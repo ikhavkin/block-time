@@ -1,0 +1,184 @@
+{
+  "range": [
+    "2026-09-14",
+    "2026-09-21"
+  ],
+  "issues": [
+    {
+      "identifier": "HOME-24",
+      "title": "Update resume",
+      "url": "https://linear.app/acme/issue/HOME-24/update-resume",
+      "estimate": 3,
+      "completedAt": "2026-09-16T21:00:00.000Z",
+      "state": {
+        "name": "Done",
+        "type": "completed"
+      },
+      "cycle": {
+        "number": 1,
+        "startsAt": "2026-09-14T07:00:00.000Z",
+        "endsAt": "2026-09-21T07:00:00.000Z"
+      },
+      "labels": {
+        "nodes": [
+          {
+            "name": "-2",
+            "parent": {
+              "name": "Energy Δ"
+            }
+          }
+        ]
+      },
+      "attachments": {
+        "nodes": []
+      }
+    },
+    {
+      "identifier": "HOME-25",
+      "title": "Reply to recruiter",
+      "url": "https://linear.app/acme/issue/HOME-25/connect",
+      "estimate": 1,
+      "completedAt": "2026-09-16T22:00:00.000Z",
+      "state": {
+        "name": "Done",
+        "type": "completed"
+      },
+      "cycle": {
+        "number": 1,
+        "startsAt": "2026-09-14T07:00:00.000Z",
+        "endsAt": "2026-09-21T07:00:00.000Z"
+      },
+      "labels": {
+        "nodes": []
+      },
+      "attachments": {
+        "nodes": []
+      }
+    },
+    {
+      "identifier": "HOME-21",
+      "title": "Weekly sync",
+      "url": "https://linear.app/acme/issue/HOME-21/weekly-sync",
+      "estimate": null,
+      "completedAt": null,
+      "state": {
+        "name": "Todo",
+        "type": "unstarted"
+      },
+      "cycle": {
+        "number": 1,
+        "startsAt": "2026-09-14T07:00:00.000Z",
+        "endsAt": "2026-09-21T07:00:00.000Z"
+      },
+      "labels": {
+        "nodes": [
+          {
+            "name": "+1",
+            "parent": {
+              "name": "Energy Δ"
+            }
+          },
+          {
+            "name": "Bug",
+            "parent": null
+          }
+        ]
+      },
+      "attachments": {
+        "nodes": []
+      }
+    },
+    {
+      "identifier": "HOME-26",
+      "title": "Pick up parcel",
+      "url": "https://linear.app/acme/issue/HOME-26/pick-up-parcel",
+      "estimate": 1,
+      "completedAt": null,
+      "state": {
+        "name": "Todo",
+        "type": "unstarted"
+      },
+      "cycle": {
+        "number": 1,
+        "startsAt": "2026-09-14T07:00:00.000Z",
+        "endsAt": "2026-09-21T07:00:00.000Z"
+      },
+      "labels": {
+        "nodes": [
+          {
+            "name": "+3",
+            "parent": {
+              "name": "Energy Δ"
+            }
+          }
+        ]
+      },
+      "attachments": {
+        "nodes": [
+          {
+            "url": "https://www.google.com/calendar/event?eid=ZXZQaWNrdXAgc29tZW9uZUBleGFtcGxlLmNvbQ",
+            "title": "Calendar: pickup parcel"
+          }
+        ]
+      }
+    }
+  ],
+  "events": [
+    {
+      "key": "1000001/evResume",
+      "eventId": "evResume",
+      "title": "Update resume",
+      "eventStart": "2026-09-16T18:30:00Z",
+      "eventEnd": "2026-09-16T20:00:00Z",
+      "description": "Linear: HOME-24 Update resume\n[https://linear.app/acme/issue/HOME-24/update-resume](https://linear.app/acme/issue/HOME-24/update-resume)"
+    },
+    {
+      "key": "1000001/evDani",
+      "eventId": "evDani",
+      "title": "Reply to recruiter",
+      "eventStart": "2026-09-16T20:00:00Z",
+      "eventEnd": "2026-09-16T20:30:00Z",
+      "description": "Linear: HOME-25\nhttps://linear.app/acme/issue/HOME-25/connect"
+    },
+    {
+      "key": "1000001/evMich",
+      "eventId": "evMich",
+      "title": "HOME-21 weekly",
+      "eventStart": "2026-09-18T18:00:00Z",
+      "eventEnd": "2026-09-18T19:00:00Z",
+      "description": ""
+    },
+    {
+      "key": "1000001/evPickup",
+      "eventId": "evPickup",
+      "title": "pick up parcel and wash the car",
+      "eventStart": "2026-09-16T20:30:00Z",
+      "eventEnd": "2026-09-16T22:00:00Z",
+      "description": ""
+    },
+    {
+      "key": "1000001/r1_20260916T153000Z",
+      "eventId": "r1_20260916T153000Z",
+      "title": "Get up",
+      "eventStart": "2026-09-16T15:30:00Z",
+      "eventEnd": "2026-09-16T15:45:00Z",
+      "description": ""
+    },
+    {
+      "key": "1000001/evOut",
+      "eventId": "evOut",
+      "title": "Outside the week",
+      "eventStart": "2026-09-22T15:30:00Z",
+      "eventEnd": "2026-09-22T16:00:00Z",
+      "description": ""
+    },
+    {
+      "key": "1000001/evQuarter",
+      "eventId": "evQuarter",
+      "title": "Q3-2026 planning",
+      "eventStart": "2026-09-17T17:00:00Z",
+      "eventEnd": "2026-09-17T17:30:00Z",
+      "description": ""
+    }
+  ]
+}

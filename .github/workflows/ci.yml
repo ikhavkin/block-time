@@ -1,0 +1,34 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.9' }
+      - run: npm run test:py
+      - run: npm run build
+      - name: build outputs must be committed (tracked and up to date)
+        run: |
+          git add -N dist linear-block-ext
+          git diff --exit-code -- dist linear-block-ext
+      - name: a change to the build outputs needs a version bump
+        run: |
+          if git rev-parse HEAD~1 >/dev/null 2>&1 && git cat-file -e HEAD~1:package.json 2>/dev/null && ! git diff --quiet HEAD~1 HEAD -- dist linear-block-ext; then
+            old=$(git show HEAD~1:package.json | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).version')
+            new=$(node -pe 'require("./package.json").version')
+            if [ "$old" = "$new" ]; then echo "dist changed but version is still $new; raw-link users would never update" >&2; exit 1; fi
+          fi

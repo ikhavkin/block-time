@@ -9,7 +9,7 @@ duration, so a scheduler like Reclaim picks the event up like any other. Pick th
 | **Linear** issue page | "📅 Block time" next to the *Activity* heading, or **Option+B**. Title `HOME-24 Update resume`, Linear URL in the description, duration from the T-shirt estimate (XS 30m, S 1h, M 2h, L 4h, XL 8h). |
 | **Reclaim** Planner, task rows | "📅 Block" (or "📅" in icon views) after *Mark Done / Start Task* for Linear, Google Tasks, Todoist and Reclaim tasks. Duration from the row's `4h` / `30m` when shown. |
 | **Reclaim** Planner, calendar events | "↗" on events that belong to a task, opening the Linear issue, Google Task or Todoist task. Resolved from an ID in the title or from the event description through Reclaim's own API. |
-| **Reclaim** Planner, other events | "＋" on hover: link an existing Linear issue (`26`, `home-26`, or a pasted URL) or create one titled like the event. The calendar link is attached to the issue; the issue lands in the active cycle when the block is inside it. |
+| **Reclaim** Planner, other events | "＋" on hover: link an existing Linear issue (`26`, `home-26`, or a pasted URL) or create one titled like the event. The calendar link is attached to the issue; the issue lands in the active cycle when the block is inside it. The link is kept in the script's own storage and, on another device, rediscovered from that attachment. |
 | **Reclaim** Planner, Linear-linked events | "⚡" badge showing the issue's energy label (a Linear label group such as *Energy Δ* with −5 … +5). Click it to pick a value from the calendar; the group's labels are mutually exclusive, so one value per issue. Read only when a Linear key is already stored. |
 
 ## Install

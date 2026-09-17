@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Task → Google Calendar block",
+  "version": "2.1.1",
+  "description": "Linear issue pages get a 📅 Block time button (or Option+B); Reclaim's Planner gets a 📅 Block action on task rows, a ↗ link on task events, a ＋ to link or create a Linear issue and a ⚡ energy badge on Linear-linked events. The 📅 buttons open a prefilled Google Calendar event; the optional Linear API key is sent only to api.linear.app.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://linear.app/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://app.reclaim.ai/*"
+      ],
+      "js": [
+        "reclaim.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
