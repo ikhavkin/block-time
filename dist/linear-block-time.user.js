@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linear → Google Calendar block
 // @namespace    https://github.com/ikhavkin/block-time
-// @version      2.1.0
+// @version      2.1.1
 // @description  On a Linear issue page, press Option+B or click "📅 Block time" next to Activity to open a prefilled Google Calendar event: "<ID> <title>", Linear URL in the description, duration from the T-shirt estimate.
 // @author       Ihor Khavkin
 // @license      MIT

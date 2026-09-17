@@ -26,7 +26,10 @@ const LINK_CLASS = 'tcb-ev-link';
 const ADD_CLASS = 'tcb-ev-add';
 const ENERGY_CLASS = 'tcb-ev-energy';
 const ENERGY_MENU = 'tcb-ev-energy-menu';
-const STORE_KEY = 'tcb-ev-links-v2';      // sessionStorage: seriesKey -> url | null
+const STORE_KEY = 'tcb-ev-links-v2';      // sessionStorage: seriesKey -> url | null (per tab; API answers)
+const DURABLE_KEY = 'tcb-ev-links';       // script/extension storage: seriesKey -> url (links made with ＋, or found on the issue)
+const ATTACH_MISS_KEY = 'tcb-ev-attach-miss';   // seriesKey -> ms timestamp of the last "no attachment" answer
+const ATTACH_TTL = 24 * 3600 * 1000;
 const API_KEY = 'tcb-linear-api-key';
 const RECLAIM_API = 'https://api.app.reclaim.ai/api';
 const LINEAR_GQL = 'https://api.linear.app/graphql';
@@ -177,6 +180,28 @@ export function main(): void {
   try { stored = JSON.parse(sessionStorage.getItem(STORE_KEY) || '{}') as Record<string, string | null>; } catch { /* ignore */ }
   const cache = new Map<string, Promise<string | null>>();
   const retryAt = new Map<string, { n: number; t: number }>();
+  // Links that must survive the tab: made with "＋" here, or found as a calendar attachment on the
+  // Linear issue (which "＋" creates, so other devices can rediscover the link). Reclaim's API refuses
+  // to write the link into the event itself, hence this side table.
+  let durable: Record<string, string> = {};
+  let attachMiss: Record<string, number> = {};
+  const parseMap = <T,>(raw: string | null, ok: (v: unknown) => v is T): Record<string, T> => {
+    try {
+      const o: unknown = JSON.parse(raw || '{}');
+      const out: Record<string, T> = {};
+      if (o && typeof o === 'object') for (const [k, v] of Object.entries(o as Record<string, unknown>)) if (ok(v)) out[k] = v;
+      return out;
+    } catch { return {}; }
+  };
+  const durableReady: Promise<void> = (async () => {
+    durable = parseMap(await store.get(DURABLE_KEY).catch(() => null), (v): v is string => typeof v === 'string' && v.startsWith('https://'));
+    attachMiss = parseMap(await store.get(ATTACH_MISS_KEY).catch(() => null), (v): v is number => typeof v === 'number');
+  })();
+  function rememberDurable(k: string, url: string): void {
+    durable[k] = url;
+    remember(k, url);
+    run(store.set(DURABLE_KEY, JSON.stringify(durable)));
+  }
 
   function remember(k: string, url: string | null): string | null {
     stored[k] = url;
@@ -191,6 +216,8 @@ export function main(): void {
     try { sessionStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
     cache.clear();
     retryAt.clear();
+    attachMiss = {};                 // durable links stay: they were made by hand, not derived from settings
+    run(store.remove(ATTACH_MISS_KEY));
     for (const chip of document.querySelectorAll<HTMLElement>(CHIP)) {
       chip.querySelectorAll('.' + LINK_CLASS + ', .' + ADD_CLASS).forEach((n) => n.remove());
       delete chip.dataset['tcbSeen'];
@@ -211,11 +238,14 @@ export function main(): void {
     const inflight = cache.get(k);
     if (inflight) return inflight;
     const s = await getSettings();
-    // The await yielded (even with settings cached): a sibling instance of the same series may have
+    await durableReady;
+    // The awaits yielded (even with settings cached): a sibling instance of the same series may have
     // registered the lookup meanwhile. Without this, N instances mean N GETs and N backoff bumps.
     if (k in stored) return stored[k] ?? null;
     const again = cache.get(k);
     if (again) return again;
+    const kept = durable[k];
+    if (kept) return remember(k, kept);
     const idRe = issueIdRegex(teamKeys(s));
     const idMatch = idRe ? chipTitle(chip).match(idRe) : null;
     let p: Promise<string | null>;
@@ -279,6 +309,7 @@ export function main(): void {
         .then((url) => {
           if (url) decorate(chip, url);
           else if (k && !(k in stored)) delete chip.dataset['tcbSeen'];   // transient failure: retry later
+          else if (k) void discoverAttachment(chip, k);
         })
         .catch(() => { delete chip.dataset['tcbSeen']; });   // e.g. settings load failed: revisit, do not toast every tick
     }
@@ -347,25 +378,65 @@ export function main(): void {
   }
 
   interface EventInfo { key: string; title: string; when: Date | null; htmlLink: string | null }
-  async function eventInfo(chip: Element): Promise<EventInfo> {
-    const key = chip.getAttribute('data-event-key') || '';
-    const [cal, ...rest] = key.split('/');
-    const id = rest.join('/');
-    const ev = await fetch(`${RECLAIM_API}/events/${cal}/${encodeURIComponent(id)}`, { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() as Promise<{ title?: string; eventStart?: string }> : null)).catch(() => null);
-    let htmlLink: string | null = null;
+  /** The Google Calendar link of an event (what "＋" attaches to the issue); null when unavailable. */
+  async function calendarLink(cal: string, id: string): Promise<string | null> {
     try {
       if (!credentialId) {
         const me = await fetch(`${RECLAIM_API}/users/current`, { credentials: 'include' }).then((r) => r.text());
         const m = me.match(/"credentialId":(\d+)/);
         credentialId = m && m[1] ? m[1] : null;
       }
-      if (credentialId) {
-        const raw = await fetch(`${RECLAIM_API}/events/raw-google/${credentialId}/${cal}/${encodeURIComponent(id)}`, { credentials: 'include' })
-          .then((r) => (r.ok ? r.json() as Promise<{ rawData?: { htmlLink?: string } }> : null));
-        htmlLink = raw?.rawData?.htmlLink ?? null;
+      if (!credentialId) return null;
+      const raw = await fetch(`${RECLAIM_API}/events/raw-google/${credentialId}/${cal}/${encodeURIComponent(id)}`, { credentials: 'include' })
+        .then((r) => (r.ok ? r.json() as Promise<{ rawData?: { htmlLink?: string } }> : null));
+      return raw?.rawData?.htmlLink ?? null;
+    } catch { return null; }
+  }
+
+  const attachPending = new Set<string>();
+  /** An event with no link in its title/description may still be attached to a Linear issue (that is
+   *  what "＋" does). Ask Linear for attachments of the event's calendar URL, once per series per day,
+   *  only when a key is already stored (never prompts), and remember a hit durably. */
+  async function discoverAttachment(chip: HTMLElement, k: string): Promise<void> {
+    await durableReady;
+    if (durable[k] || attachPending.has(k)) return;
+    const miss = attachMiss[k];
+    if (miss !== undefined && Date.now() - miss < ATTACH_TTL) return;
+    if (!(await store.get(API_KEY).catch(() => null))) return;
+    attachPending.add(k);
+    try {
+      const key = chip.getAttribute('data-event-key') || '';
+      const [cal = '', ...rest] = key.split('/');
+      const link = await calendarLink(cal, rest.join('/'));
+      if (!link) return;
+      const d = await gql<{ attachmentsForURL: { nodes: { issue: { url: string } | null }[] } }>(
+        'query($url:String!){ attachmentsForURL(url:$url, first:5){ nodes{ issue{ url } } } }', { url: link }, { interactive: false });
+      const url = d.attachmentsForURL.nodes.map((n) => n.issue?.url).find((u): u is string => typeof u === 'string' && u.startsWith('https://')) ?? null;
+      if (url) {
+        rememberDurable(k, url);
+        for (const c of document.querySelectorAll<HTMLElement>(CHIP)) {
+          if (seriesKey(c.getAttribute('data-event-key') || '') !== k) continue;
+          c.querySelectorAll('.' + ADD_CLASS).forEach((n) => n.remove());
+          decorate(c, url);
+        }
+      } else {
+        attachMiss[k] = Date.now();
+        void store.set(ATTACH_MISS_KEY, JSON.stringify(attachMiss)).catch(() => undefined);
       }
-    } catch { /* the calendar attachment is optional */ }
+    } catch {
+      attachMiss[k] = Date.now() - ATTACH_TTL + 5 * 60 * 1000;   // transient: try again in five minutes
+    } finally {
+      attachPending.delete(k);
+    }
+  }
+
+  async function eventInfo(chip: Element): Promise<EventInfo> {
+    const key = chip.getAttribute('data-event-key') || '';
+    const [cal = '', ...rest] = key.split('/');
+    const id = rest.join('/');
+    const ev = await fetch(`${RECLAIM_API}/events/${cal}/${encodeURIComponent(id)}`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() as Promise<{ title?: string; eventStart?: string }> : null)).catch(() => null);
+    const htmlLink = await calendarLink(cal, id);
     const title = ev?.title || chipTitle(chip);
     const when = ev?.eventStart ? new Date(ev.eventStart) : null;
     return { key, title, when, htmlLink };
@@ -415,7 +486,7 @@ export function main(): void {
         { issueId: issue.id, url: info.htmlLink, title: label }).then(() => true).catch(() => false);
     }
     const sk = seriesKey(info.key);
-    remember(sk, issue.url);
+    rememberDurable(sk, issue.url);
     // Update every live chip of this series (re-rendered replacements, sibling recurring instances).
     for (const c of document.querySelectorAll<HTMLElement>(CHIP)) {
       if (seriesKey(c.getAttribute('data-event-key') || '') !== sk) continue;

@@ -310,6 +310,9 @@
   var ENERGY_CLASS = "tcb-ev-energy";
   var ENERGY_MENU = "tcb-ev-energy-menu";
   var STORE_KEY = "tcb-ev-links-v2";
+  var DURABLE_KEY = "tcb-ev-links";
+  var ATTACH_MISS_KEY = "tcb-ev-attach-miss";
+  var ATTACH_TTL = 24 * 3600 * 1e3;
   var API_KEY = "tcb-linear-api-key";
   var RECLAIM_API = "https://api.app.reclaim.ai/api";
   var LINEAR_GQL = "https://api.linear.app/graphql";
@@ -450,6 +453,29 @@
     }
     const cache = /* @__PURE__ */ new Map();
     const retryAt = /* @__PURE__ */ new Map();
+    let durable = {};
+    let attachMiss = {};
+    const parseMap = (raw, ok) => {
+      try {
+        const o = JSON.parse(raw || "{}");
+        const out = {};
+        if (o && typeof o === "object") {
+          for (const [k, v] of Object.entries(o)) if (ok(v)) out[k] = v;
+        }
+        return out;
+      } catch {
+        return {};
+      }
+    };
+    const durableReady = (async () => {
+      durable = parseMap(await store.get(DURABLE_KEY).catch(() => null), (v) => typeof v === "string" && v.startsWith("https://"));
+      attachMiss = parseMap(await store.get(ATTACH_MISS_KEY).catch(() => null), (v) => typeof v === "number");
+    })();
+    function rememberDurable(k, url) {
+      durable[k] = url;
+      remember(k, url);
+      run(store.set(DURABLE_KEY, JSON.stringify(durable)));
+    }
     function remember(k, url) {
       stored[k] = url;
       try {
@@ -466,6 +492,8 @@
       }
       cache.clear();
       retryAt.clear();
+      attachMiss = {};
+      run(store.remove(ATTACH_MISS_KEY));
       for (const chip of document.querySelectorAll(CHIP)) {
         chip.querySelectorAll("." + LINK_CLASS + ", ." + ADD_CLASS).forEach((n) => n.remove());
         delete chip.dataset["tcbSeen"];
@@ -484,9 +512,12 @@
       const inflight = cache.get(k);
       if (inflight) return inflight;
       const s = await getSettings();
+      await durableReady;
       if (k in stored) return stored[k] ?? null;
       const again = cache.get(k);
       if (again) return again;
+      const kept = durable[k];
+      if (kept) return remember(k, kept);
       const idRe = issueIdRegex(teamKeys(s));
       const idMatch = idRe ? chipTitle(chip).match(idRe) : null;
       let p;
@@ -551,6 +582,7 @@
         void resolveLink(chip).then((url) => {
           if (url) decorate(chip, url);
           else if (k && !(k in stored)) delete chip.dataset["tcbSeen"];
+          else if (k) void discoverAttachment(chip, k);
         }).catch(() => {
           delete chip.dataset["tcbSeen"];
         });
@@ -611,24 +643,62 @@
       if (!j.data) throw new Error("Linear returned no data");
       return j.data;
     }
-    async function eventInfo(chip) {
-      const key = chip.getAttribute("data-event-key") || "";
-      const [cal, ...rest] = key.split("/");
-      const id = rest.join("/");
-      const ev = await fetch(`${RECLAIM_API}/events/${cal}/${encodeURIComponent(id)}`, { credentials: "include" }).then((r) => r.ok ? r.json() : null).catch(() => null);
-      let htmlLink = null;
+    async function calendarLink(cal, id) {
       try {
         if (!credentialId) {
           const me = await fetch(`${RECLAIM_API}/users/current`, { credentials: "include" }).then((r) => r.text());
           const m = me.match(/"credentialId":(\d+)/);
           credentialId = m && m[1] ? m[1] : null;
         }
-        if (credentialId) {
-          const raw = await fetch(`${RECLAIM_API}/events/raw-google/${credentialId}/${cal}/${encodeURIComponent(id)}`, { credentials: "include" }).then((r) => r.ok ? r.json() : null);
-          htmlLink = raw?.rawData?.htmlLink ?? null;
+        if (!credentialId) return null;
+        const raw = await fetch(`${RECLAIM_API}/events/raw-google/${credentialId}/${cal}/${encodeURIComponent(id)}`, { credentials: "include" }).then((r) => r.ok ? r.json() : null);
+        return raw?.rawData?.htmlLink ?? null;
+      } catch {
+        return null;
+      }
+    }
+    const attachPending = /* @__PURE__ */ new Set();
+    async function discoverAttachment(chip, k) {
+      await durableReady;
+      if (durable[k] || attachPending.has(k)) return;
+      const miss = attachMiss[k];
+      if (miss !== void 0 && Date.now() - miss < ATTACH_TTL) return;
+      if (!await store.get(API_KEY).catch(() => null)) return;
+      attachPending.add(k);
+      try {
+        const key = chip.getAttribute("data-event-key") || "";
+        const [cal = "", ...rest] = key.split("/");
+        const link = await calendarLink(cal, rest.join("/"));
+        if (!link) return;
+        const d = await gql(
+          "query($url:String!){ attachmentsForURL(url:$url, first:5){ nodes{ issue{ url } } } }",
+          { url: link },
+          { interactive: false }
+        );
+        const url = d.attachmentsForURL.nodes.map((n) => n.issue?.url).find((u) => typeof u === "string" && u.startsWith("https://")) ?? null;
+        if (url) {
+          rememberDurable(k, url);
+          for (const c of document.querySelectorAll(CHIP)) {
+            if (seriesKey(c.getAttribute("data-event-key") || "") !== k) continue;
+            c.querySelectorAll("." + ADD_CLASS).forEach((n) => n.remove());
+            decorate(c, url);
+          }
+        } else {
+          attachMiss[k] = Date.now();
+          void store.set(ATTACH_MISS_KEY, JSON.stringify(attachMiss)).catch(() => void 0);
         }
       } catch {
+        attachMiss[k] = Date.now() - ATTACH_TTL + 5 * 60 * 1e3;
+      } finally {
+        attachPending.delete(k);
       }
+    }
+    async function eventInfo(chip) {
+      const key = chip.getAttribute("data-event-key") || "";
+      const [cal = "", ...rest] = key.split("/");
+      const id = rest.join("/");
+      const ev = await fetch(`${RECLAIM_API}/events/${cal}/${encodeURIComponent(id)}`, { credentials: "include" }).then((r) => r.ok ? r.json() : null).catch(() => null);
+      const htmlLink = await calendarLink(cal, id);
       const title = ev?.title || chipTitle(chip);
       const when = ev?.eventStart ? new Date(ev.eventStart) : null;
       return { key, title, when, htmlLink };
@@ -672,7 +742,7 @@
         ).then(() => true).catch(() => false);
       }
       const sk = seriesKey(info.key);
-      remember(sk, issue.url);
+      rememberDurable(sk, issue.url);
       for (const c of document.querySelectorAll(CHIP)) {
         if (seriesKey(c.getAttribute("data-event-key") || "") !== sk) continue;
         c.querySelectorAll("." + ADD_CLASS).forEach((n) => n.remove());

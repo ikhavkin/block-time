@@ -173,6 +173,8 @@ export class FakeLinear {
     { id: 'm-1', name: '-1', parent: { name: 'Mood' } }, { id: 'm+1', name: '+1', parent: { name: 'Mood' } },
   ];
   issues = new Map<string, { id: string; labelIds: string[] }>();
+  /** calendar URL -> issue id, as attachmentLinkURL records it. */
+  attachments = new Map<string, string>();
   updates: Record<string, any>[] = [];
   /** Answers first when it returns a response; null falls through to the default handling. */
   hook: ((call: GqlCall) => Promise<FakeResponse | null> | FakeResponse | null) | null = null;
@@ -209,6 +211,21 @@ export class FakeLinear {
       }
       return jsonResp({ data: { issueUpdate: { success: true } } });
     }
+    if (q.includes('issue(id:$id){ id identifier url title }')) {
+      const ident = String(v['id']).toUpperCase();
+      const i = this.issue(ident);
+      return jsonResp({ data: { issue: { id: i.id, identifier: ident, url: `https://linear.app/acme/issue/${ident}/x`, title: 'Task ' + ident } } });
+    }
+    if (q.includes('attachmentLinkURL(')) {
+      this.attachments.set(String(v['url']), String(v['issueId']));
+      return jsonResp({ data: { attachmentLinkURL: { success: true } } });
+    }
+    if (q.includes('attachmentsForURL(')) {
+      const issueId = this.attachments.get(String(v['url']));
+      const ident = issueId ? [...this.issues.entries()].find(([, x]) => x.id === issueId)?.[0] : undefined;
+      const nodes = ident ? [{ issue: { url: `https://linear.app/acme/issue/${ident}/x` } }] : [];
+      return jsonResp({ data: { attachmentsForURL: { nodes } } });
+    }
     return jsonResp({ errors: [{ message: 'unrouted query' }] });
   }
 }
@@ -221,7 +238,7 @@ function mem(init: Record<string, string>): MemStore {
 
 // ---- harness --------------------------------------------------------------------------------------
 
-export interface HarnessOptions { apiKey?: string; settings?: Record<string, unknown>; storage?: 'local' | 'extension' }
+export interface HarnessOptions { apiKey?: string; settings?: Record<string, unknown>; storage?: 'local' | 'extension'; extMap?: Map<string, string>; linear?: FakeLinear }
 export interface Harness {
   ctx: Record<string, any>;
   document: FakeDocument;
@@ -256,7 +273,7 @@ export function makeHarness(o: HarnessOptions = {}): Harness {
   const session = mem({});
   const intervals: (() => void)[] = [];
   const toasts: string[] = []; const promptAnswers: string[] = []; const promptsShown: string[] = []; const logs: string[] = [];
-  const linear = new FakeLinear();
+  const linear = o.linear ?? new FakeLinear();
   const calls: GqlCall[] = [];
   const ctx: Record<string, any> = {
     console: { info: (...a: unknown[]) => logs.push(a.join(' ')), log: () => {}, warn: () => {}, error: (...a: unknown[]) => logs.push('ERR ' + a.join(' ')) },
@@ -279,7 +296,7 @@ export function makeHarness(o: HarnessOptions = {}): Harness {
         return hooked ?? linear.handle(call);
       }
       if (url.includes('/api/users/current')) return resp(200, '{"credentialId":1}');
-      if (url.includes('/api/events/raw-google/')) return jsonResp({ rawData: { htmlLink: 'https://calendar.google.com/event?eid=abc' } });
+      if (url.includes('/api/events/raw-google/')) return jsonResp({ rawData: { htmlLink: 'https://calendar.google.com/event?eid=' + (url.split('/').pop() ?? 'abc') } });   // one link per event
       if (url.includes('/api/events/')) return resp(404, '');
       throw new Error('unrouted fetch ' + url);
     },
@@ -288,7 +305,8 @@ export function makeHarness(o: HarnessOptions = {}): Harness {
   if (o.storage === 'extension') {
     // chrome.storage.local as a FIFO of asynchronous operations (Chromium's storage backend is
     // sequenced): an operation issued earlier always completes earlier, never in the same tick.
-    const m = new Map(local.map);
+    const m = o.extMap ?? new Map(local.map);
+    if (o.extMap) for (const [k, v] of local.map) if (!m.has(k)) m.set(k, v);
     local.map.clear();
     ext = m;
     const later = <T,>(f: () => T): Promise<T> => new Promise((r) => setImmediate(() => r(f())));

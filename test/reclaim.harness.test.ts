@@ -255,3 +255,60 @@ test('clicking the badge with no stored key asks once and proceeds with the type
   assert.equal(H.promptsShown.length, 1);
   assert.equal(H.toasts.length, 0, H.toasts.join("|"));
 });
+
+test('a link made with ＋ survives a new tab: kept in extension storage and restored without any lookup', async () => {
+  const H = await page({ storage: 'extension' });
+  const chip = await chipOn(H, 'cal/pickup', 'pickup meds');      // events API answers 404 → no link → ＋
+  H.tick(); await H.flush();
+  const plus = q(chip, '.tcb-ev-add');
+  assert.ok(plus, '＋ offered');
+  H.promptAnswers.push('26');
+  dispatch(plus, 'click');
+  await H.flush(20);
+  assert.ok(q(chip, '.tcb-ev-link'), '↗ after linking');
+  assert.equal(H.toasts.at(-1)?.startsWith('Linked HOME-26'), true, H.toasts.join('|'));
+  const kept = JSON.parse(H.ext!.get('tcb-ev-links') ?? '{}');
+  assert.equal(kept['cal/pickup'], 'https://linear.app/acme/issue/HOME-26/x');
+
+  // a fresh page (new tab: empty sessionStorage) sharing the same extension storage
+  const H2 = makeHarness({ apiKey: 'lin_api_test', settings: SETTINGS, storage: 'extension', extMap: H.ext!, linear: H.linear });
+  await H2.run();
+  const chip2 = await chipOn(H2, 'cal/pickup', 'pickup meds');
+  H2.tick(); await H2.flush();
+  assert.ok(q(chip2, '.tcb-ev-link'), '↗ restored from durable storage');
+  assert.equal(q(chip2, '.tcb-ev-add'), null, 'no ＋ once linked');
+  assert.equal(H2.calls.filter((c) => c.query.includes('attachmentsForURL')).length, 0, 'no discovery needed');
+});
+
+test('another device finds the link through the calendar attachment on the issue, once per series per day', async () => {
+  const shared = new (await import('./fakedom.ts')).FakeLinear();
+  shared.issue('HOME-26');
+  shared.attachments.set('https://calendar.google.com/event?eid=pickup_20260917', 'iss-HOME-26');   // what ＋ attached elsewhere
+  const H = makeHarness({ apiKey: 'lin_api_test', settings: SETTINGS, storage: 'extension', linear: shared });
+  await H.run();
+  const chip = await chipOn(H, 'cal/pickup_20260917', 'pickup meds');
+  H.tick(); await H.flush(20);
+  assert.ok(q(chip, '.tcb-ev-link'), '↗ discovered from the attachment');
+  assert.equal(q(chip, '.tcb-ev-add'), null);
+  assert.equal(H.calls.filter((c) => c.query.includes('attachmentsForURL')).length, 1);
+  assert.equal(JSON.parse(H.ext!.get('tcb-ev-links') ?? '{}')['cal/pickup'], 'https://linear.app/acme/issue/HOME-26/x');
+
+  // an event with no attachment is asked once, then remembered as a miss for a day
+  const none = await chipOn(H, 'cal/routine', 'Get up');
+  H.tick(); await H.flush(20);
+  assert.equal(q(none, '.tcb-ev-add') !== null, true, '＋ stays');
+  const asked = H.calls.filter((c) => c.query.includes('attachmentsForURL')).length;
+  none.remove();
+  const again = await chipOn(H, 'cal/routine', 'Get up');
+  H.tick(); await H.flush(20);
+  assert.equal(H.calls.filter((c) => c.query.includes('attachmentsForURL')).length, asked, 'no second query inside the TTL');
+  assert.ok(q(again, '.tcb-ev-add'));
+
+  // without a stored key nothing is asked and nothing prompts
+  const bare = makeHarness({ settings: SETTINGS, storage: 'extension', linear: shared });
+  await bare.run();
+  await chipOn(bare, 'cal/pickup2', 'pickup meds');
+  bare.tick(); await bare.flush(20);
+  assert.equal(bare.calls.length, 0);
+  assert.equal(bare.promptsShown.length, 0);
+});
