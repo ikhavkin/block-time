@@ -59,6 +59,7 @@ tools/energy_week.py --team HOME --cycle current                             # t
 tools/energy_week.py --from-json tools/fixtures/energy_week_sample.json --print   # offline demo
 tools/energy_week.py --team HOME --csv --out ~/Downloads/energy.csv    # every rated issue as a spreadsheet, oldest first
 tools/energy_week.py --team HOME --csv --cycle current --print          # only the ratings recorded in the active cycle
+tools/energy_week.py --team HOME --tasks --summary --out ~/Downloads/tasks.csv   # every scheduled task with its rating, plus an energy summary (tasks-summary.md)
 ```
 
 `--csv` skips the calendar (only `LINEAR_API_KEY` is needed) and lists every issue of the team that carries a
@@ -66,6 +67,11 @@ rating, one row each, oldest rating first: `recorded_at` comes from Linear's iss
 added), falling back to the completion time and then the last update, and `recorded_basis` says which. The
 `issue_link` column is a `HYPERLINK` formula, so the identifier opens the issue from Numbers, Excel or Google
 Sheets; `url` is the plain address. `--week` or `--cycle` keep only the ratings recorded in that range.
+
+`--tasks` lists every scheduled task of the team instead (one that sits in a cycle or has a due date), in schedule
+order, with its rating when it has one; `--week`/`--cycle` keep the tasks scheduled in that range. `--summary` adds
+an energy summary in Markdown to either listing: how many rated, mean and spread, the distribution, per week, the
+most draining and most energising tasks, and the finished tasks still to rate.
 
 `LINEAR_TEAM` and `ENERGY_OUT_DIR` in the environment are the defaults for `--team` and for the output
 folder (`<folder>/<week>.md`); `--tz` picks the grid's zone (default: the system zone). Events are matched

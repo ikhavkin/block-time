@@ -530,3 +530,61 @@ class CsvExport(unittest.TestCase):
             for k, v in old.items():
                 if v is not None:
                     os.environ[k] = v
+
+
+class TasksAndSummary(unittest.TestCase):
+    def test_schedule_of(self):
+        issues, _, _, _ = load()
+        by = {i["identifier"]: i for i in issues}
+        s, e, label = ew.schedule_of(by["HOME-24"], LA)
+        self.assertEqual((s, e), (dt.date(2026, 9, 14), dt.date(2026, 9, 21))); self.assertTrue(label.startswith("Cycle 1 ("))
+        s, e, label = ew.schedule_of(by["HOME-27"], LA)
+        self.assertEqual((s, e, label), (dt.date(2026, 9, 23), dt.date(2026, 9, 24), "Due 2026-09-23"))
+        self.assertEqual(ew.schedule_of({"cycle": None, "dueDate": None}), (None, None, ""))
+
+    def test_task_rows_schedule_order_and_range(self):
+        issues, _, _, _ = load()
+        rows = ew.task_rows(issues, "Energy Δ", LA)
+        self.assertEqual(rows[0], ew.TASK_COLUMNS)
+        self.assertEqual([r[1] for r in rows[1:]], ["HOME-21", "HOME-24", "HOME-25", "HOME-26", "HOME-27"], "cycle 1 tasks by identifier, then the due-dated one; the duplicate is out")
+        home24 = rows[2]
+        self.assertEqual(home24[4:7], ["Done", "M", "-2"]); self.assertEqual(home24[8], "label set")
+        home25 = rows[3]
+        self.assertEqual(home25[6:9], ["", "", ""], "an unrated task has empty rating columns")
+        self.assertEqual(rows[5][0], "Due 2026-09-23")
+        week = ew.task_rows(issues, "Energy Δ", LA, dt.date(2026, 9, 21), dt.date(2026, 9, 28))
+        self.assertEqual([r[1] for r in week[1:]], ["HOME-27"], "only what is scheduled inside the range")
+        overlap = ew.task_rows(issues, "Energy Δ", LA, dt.date(2026, 9, 20), dt.date(2026, 9, 21))
+        self.assertEqual(len(overlap) - 1, 4, "a cycle overlapping the range counts")
+
+    def test_energy_summary(self):
+        issues, _, _, _ = load()
+        md = ew.energy_summary(issues, "Energy Δ", LA)
+        self.assertIn("## Energy summary (all time)", md)
+        self.assertIn("| 3 | +0.67 | +1.0 | +2 | −2 | +3 | 2 |", md, "three rated live tasks (the duplicate's +3 is out): mean, median, sum, min, max, open")
+        self.assertIn("| +3 | █ 1 |", md); self.assertIn("| −2 | █ 1 |", md)
+        self.assertIn("| 2026-W38 |", md)
+        self.assertIn("Most draining:", md); self.assertIn("−2 [HOME-24]", md)
+        self.assertIn("Finished but not rated (1):", md); self.assertIn("[HOME-25]", md)
+        ranged = ew.energy_summary(issues, "Energy Δ", LA, dt.date(2026, 9, 1), dt.date(2026, 9, 16))
+        self.assertIn("| 1 | +1.00 |", ranged, "only HOME-21, recorded on 09-15")
+        self.assertIn("No rated tasks.", ew.energy_summary([], "Energy Δ", LA))
+
+    def test_cli_tasks_and_summary(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ew.main(["--tasks", "--summary", "--from-json", str(FIX), "--print", "--tz", "America/Los_Angeles"])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertTrue(out.startswith(",".join(ew.TASK_COLUMNS)))
+        self.assertIn("## Energy summary", out)
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "tasks.csv"
+            with redirect_stdout(io.StringIO()):
+                rc = ew.main(["--tasks", "--summary", "--from-json", str(FIX), "--out", str(csv_path)])
+            self.assertEqual(rc, 0)
+            self.assertTrue(csv_path.exists()); self.assertTrue((Path(tmp) / "tasks-summary.md").exists())
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.assertEqual(ew.main(["--summary", "--from-json", str(FIX), "--print"]), 2)
+        self.assertIn("--summary goes with", err.getvalue())

@@ -6,6 +6,11 @@ of the same week, matches events to issues (Linear URL or identifier in the even
 attachment the "＋" button adds to the issue), and writes a Markdown file meant for Obsidian: a
 summary table, an hour-by-day grid with ⚡ values, per-day lists and the rated/unrated tasks.
 
+--tasks lists every scheduled task of the team (one that sits in a cycle or has a due date), in schedule order, with its
+rating when it has one and its completion; --week/--cycle keep the tasks scheduled in that range. --summary adds an
+energy summary (how many rated, mean and spread, the distribution, per week, and the finished tasks still to rate) to
+either listing.
+
 --csv skips the calendar and lists every issue that carries a rating, one row each in the order the ratings
 were recorded (Linear's issue history says when the label was added; a completion or last-update time stands in
 when the history has no such entry). The `issue_link` column is a HYPERLINK formula, so the identifier opens the
@@ -22,6 +27,8 @@ Examples
   energy_week.py --from-json tools/fixtures/energy_week_sample.json --print   # offline / tests
   energy_week.py --team HOME --csv --out ~/Downloads/energy.csv    # every rated issue, oldest first, as a spreadsheet
   energy_week.py --team HOME --csv --cycle current --print          # only the ratings recorded during the active cycle
+  energy_week.py --team HOME --tasks --out ~/Downloads/tasks.csv    # every scheduled task (a cycle or a due date), with its rating
+  energy_week.py --team HOME --tasks --summary --print              # …plus an energy summary (counts, mean, spread, per week)
 Environment: LINEAR_TEAM is the default for --team; ENERGY_OUT_DIR is the default output folder (else the
 current directory). --tz picks the grid's zone (default: the system zone).
 """
@@ -171,6 +178,25 @@ query($team:String!, $group:String!, $after:String) {
 }
 """
 
+TASKS_QUERY = """
+query($team:String!, $after:String) {
+  issues(first: 50, after: $after, includeArchived: true, orderBy: createdAt, filter: {
+    team: { key: { eq: $team } },
+    or: [ { cycle: { null: false } }, { dueDate: { null: false } } ]
+  }) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      identifier title url estimate createdAt updatedAt completedAt dueDate
+      state { name type }
+      cycle { number startsAt endsAt }
+      parent { identifier }
+      labels { nodes { id name parent { name } } }
+      history(first: 100) { nodes { createdAt addedLabelIds } }
+    }
+  }
+}
+"""
+
 CYCLE_QUERY = """
 query($team:String!) {
   teams(filter: { key: { eq: $team } }) { nodes {
@@ -218,6 +244,18 @@ def fetch_labelled(team: str, group: str, key: str) -> List[Issue]:
     after = None
     while True:
         page = linear_post(LABELLED_QUERY, {"team": team, "group": group, "after": after}, key)["issues"]
+        out.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return out
+        after = page["pageInfo"]["endCursor"]
+
+
+def fetch_tasks(team: str, key: str) -> List[Issue]:
+    """Every scheduled issue of the team (in a cycle or with a due date), archived ones included."""
+    out: List[Issue] = []
+    after = None
+    while True:
+        page = linear_post(TASKS_QUERY, {"team": team, "after": after}, key)["issues"]
         out.extend(page["nodes"])
         if not page["pageInfo"]["hasNextPage"]:
             return out
@@ -460,13 +498,15 @@ def hyperlink(url: str, text: str) -> str:
 
 def csv_rows(issues: Iterable[Issue], group: str, tz: Optional[dt.tzinfo] = None,
              start: Optional[dt.date] = None, end: Optional[dt.date] = None) -> List[List[str]]:
-    """Header plus one row per rated issue, oldest rating first (ties by identifier). With start/end, only ratings
-    recorded on a local day inside [start, end)."""
+    """Header plus one row per rated issue, oldest rating first (ties by identifier); canceled and duplicate issues are
+    left out. With start/end, only ratings recorded on a local day inside [start, end)."""
     def local(d: Optional[dt.datetime]) -> str:
         return _local(d, tz).strftime("%Y-%m-%d %H:%M") if d else ""
 
     rows: List[Tuple[Tuple[float, str], List[str]]] = []
     for issue in issues:
+        if (issue.get("state") or {}).get("type") in ("canceled", "duplicate"):   # a rating on a duplicate is noise
+            continue
         label = energy_label(issue, group)
         if not label:
             continue
@@ -499,6 +539,113 @@ def csv_text(rows: List[List[str]]) -> str:
     return buf.getvalue()
 
 
+# ---- every scheduled task, and the energy summary --------------------------------------------------
+
+TASK_COLUMNS = ["scheduled", "issue", "issue_link", "title", "status", "estimate", "energy", "recorded_at", "recorded_basis",
+                "parent", "created", "completed", "url"]
+
+
+def schedule_of(issue: Issue, tz: Optional[dt.tzinfo] = None) -> Tuple[Optional[dt.date], Optional[dt.date], str]:
+    """(first day, last day exclusive, label) of when the issue is scheduled: its cycle, else its due date; (None, None, '') when neither."""
+    cycle = issue.get("cycle") or {}
+    if cycle.get("startsAt") and cycle.get("endsAt"):
+        s, e = _local(parse_when(cycle["startsAt"]), tz).date(), _local(parse_when(cycle["endsAt"]), tz).date()
+        return s, e, f"Cycle {cycle.get('number', '?')} ({s.isoformat()} to {e.isoformat()})"
+    if issue.get("dueDate"):
+        d = dt.date.fromisoformat(str(issue["dueDate"])[:10])
+        return d, d + dt.timedelta(days=1), f"Due {d.isoformat()}"
+    return None, None, ""
+
+
+def task_rows(issues: Iterable[Issue], group: str, tz: Optional[dt.tzinfo] = None,
+              start: Optional[dt.date] = None, end: Optional[dt.date] = None) -> List[List[str]]:
+    """Header plus one row per scheduled task, in schedule order (then identifier). With start/end, only tasks whose
+    schedule overlaps [start, end). Duplicates and canceled tasks are left out."""
+    def local(d: Optional[dt.datetime]) -> str:
+        return _local(d, tz).strftime("%Y-%m-%d %H:%M") if d else ""
+
+    rows: List[Tuple[Tuple[dt.date, str], List[str]]] = []
+    for issue in issues:
+        if (issue.get("state") or {}).get("type") in ("canceled", "duplicate"):
+            continue
+        s, e, label = schedule_of(issue, tz)
+        if s is None or e is None:
+            continue
+        if start and end and not (s < end and e > start):
+            continue
+        label_node = energy_label(issue, group)
+        when, basis = recorded_at(issue, group) if label_node else (None, "")
+        est = issue.get("estimate")
+        row = [label, issue.get("identifier", ""), hyperlink(issue.get("url", ""), issue.get("identifier", "")), issue.get("title", ""),
+               (issue.get("state") or {}).get("name", ""), ESTIMATE_NAMES.get(est, str(est)) if est is not None else "",
+               energy_text(energy_value(label_node.get("name", ""))).replace("−", "-") if label_node else "",
+               local(when), basis if label_node else "",
+               (issue.get("parent") or {}).get("identifier", "") if issue.get("parent") else "",
+               local(parse_when(issue["createdAt"])) if issue.get("createdAt") else "",
+               local(parse_when(issue["completedAt"])) if issue.get("completedAt") else "", issue.get("url", "")]
+        rows.append(((s, issue.get("identifier", "")), row))
+    rows.sort(key=lambda r: r[0])
+    return [TASK_COLUMNS] + [r for _, r in rows]
+
+
+def energy_summary(issues: Iterable[Issue], group: str, tz: Optional[dt.tzinfo] = None,
+                   start: Optional[dt.date] = None, end: Optional[dt.date] = None) -> str:
+    """A Markdown summary of the ratings: how many, mean and spread, the distribution, per ISO week of recording, the
+    finished-but-unrated tasks, and the best and worst rated. With start/end, ratings recorded on a day in [start, end)."""
+    live = [i for i in issues if (i.get("state") or {}).get("type") not in ("canceled", "duplicate")]
+    rated: List[Tuple[Issue, int, Optional[dt.datetime], str]] = []
+    for issue in live:
+        label = energy_label(issue, group)
+        if not label:
+            continue
+        value = energy_value(label.get("name", ""))
+        if value is None:
+            continue
+        when, basis = recorded_at(issue, group)
+        if start and end and (not when or not (start <= _local(when, tz).date() < end)):
+            continue
+        rated.append((issue, value, when, basis))
+    done_unrated = [i for i in live if (i.get("state") or {}).get("type") == "completed" and not energy_label(i, group)
+                    and (not (start and end) or (i.get("completedAt") and start <= _local(parse_when(i["completedAt"]), tz).date() < end))]
+    scope = f"{start.isoformat()} to {end.isoformat()}" if start and end else "all time"
+    lines = [f"## Energy summary ({scope})", ""]
+    if not rated:
+        lines += ["No rated tasks.", ""]
+    else:
+        values = sorted(v for _, v, _, _ in rated)
+        n = len(values)
+        mean = sum(values) / n
+        median = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+        done = sum(1 for i, _, _, _ in rated if (i.get("state") or {}).get("type") == "completed")
+        lines += ["| Rated | Mean | Median | Sum | Min | Max | Rated while still open |", "|---|---|---|---|---|---|---|",
+                  f"| {n} | {mean:+.2f} | {median:+.1f} | {sum(values):+d} | {energy_text(values[0])} | {energy_text(values[-1])} | {n - done} |", ""]
+        lines += ["| Value | Tasks |", "|---|---|"]
+        for v in sorted(set(values), reverse=True):
+            lines.append(f"| {energy_text(v)} | {'█' * values.count(v)} {values.count(v)} |")
+        lines.append("")
+        by_week: Dict[str, List[int]] = defaultdict(list)
+        for _, v, when, _ in rated:
+            by_week[week_label(_local(when, tz).date()) if when else "undated"].append(v)
+        lines += ["| Week | Rated | Mean | Sum |", "|---|---|---|---|"]
+        for wk in sorted(by_week):
+            vs = by_week[wk]
+            lines.append(f"| {wk} | {len(vs)} | {sum(vs) / len(vs):+.2f} | {sum(vs):+d} |")
+        lines.append("")
+        ranked = sorted(rated, key=lambda r: (r[1], r[0].get("identifier", "")))
+        def item(r: Tuple[Issue, int, Optional[dt.datetime], str]) -> str:
+            i, v, when, basis = r
+            date = _local(when, tz).strftime("%Y-%m-%d") if when else "undated"
+            return f"- {energy_text(v)} [{i.get('identifier', '')}]({i.get('url', '')}) {_short(i.get('title', ''), 60)} ({date}, {basis})"
+        lines += ["Most draining:"] + [item(r) for r in ranked[:3]] + ["", "Most energising:"] + [item(r) for r in reversed(ranked[-3:])] + [""]
+    if done_unrated:
+        lines += [f"Finished but not rated ({len(done_unrated)}):"]
+        for i in sorted(done_unrated, key=lambda i: i.get("completedAt") or ""):
+            date = _local(parse_when(i["completedAt"]), tz).strftime("%Y-%m-%d") if i.get("completedAt") else ""
+            lines.append(f"- [{i.get('identifier', '')}]({i.get('url', '')}) {_short(i.get('title', ''), 60)} ({date})")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     out_dir = os.environ.get("ENERGY_OUT_DIR") or DEFAULT_OUT_DIR
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -515,6 +662,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--tz", help="IANA time zone for the grid (default: the system zone)")
     ap.add_argument("--csv", action="store_true",
                     help="instead of the week page: every rated issue as CSV, oldest rating first (--week/--cycle narrow it)")
+    ap.add_argument("--tasks", action="store_true",
+                    help="instead of the week page: every scheduled task (a cycle or a due date) as CSV, with its rating (--week/--cycle narrow it)")
+    ap.add_argument("--summary", action="store_true",
+                    help="with --csv or --tasks: also an energy summary in Markdown (to stdout with --print, else next to the CSV)")
     args = ap.parse_args(argv)
 
     if args.tz:
@@ -527,8 +678,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         tz = None  # system zone; astimezone(None) resolves the offset per instant, so DST is right for any week
 
-    if args.csv:
+    if args.csv or args.tasks:
         return _main_csv(args, out_dir, tz)
+    if args.summary:
+        print("error: --summary goes with --csv or --tasks", file=sys.stderr)
+        return 2
 
     try:
         if args.from_json:
@@ -575,7 +729,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _main_csv(args: argparse.Namespace, out_dir: str, tz: Optional[dt.tzinfo]) -> int:
-    """--csv: no calendar, no Reclaim token; the range (if any) filters by when the rating was recorded."""
+    """--csv / --tasks: no calendar, no Reclaim token; the range (if any) filters by when the rating was recorded (--csv)
+    or by when the task is scheduled (--tasks). --summary adds the Markdown summary."""
     try:
         start = end = None
         if args.from_json:
@@ -595,21 +750,29 @@ def _main_csv(args: argparse.Namespace, out_dir: str, tz: Optional[dt.tzinfo]) -
                 start, end = cycle_range(args.team, args.cycle, key)
             elif args.week:
                 start, end = iso_week_range(args.week)
-            issues = fetch_labelled(args.team, args.group, key)
+            issues = fetch_tasks(args.team, key) if args.tasks else fetch_labelled(args.team, args.group, key)
             if args.dump_json:
                 Path(args.dump_json).write_text(json.dumps({"issues": issues, "events": []}, indent=2), encoding="utf-8")
-        rows = csv_rows(issues, args.group, tz, start, end)
+        rows = task_rows(issues, args.group, tz, start, end) if args.tasks else csv_rows(issues, args.group, tz, start, end)
+        summary = energy_summary(issues, args.group, tz, start, end) if args.summary else None
     except ToolError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     text = csv_text(rows)
+    what = "scheduled tasks" if args.tasks else "rated issues"
     if args.print:
         sys.stdout.write(text)
+        if summary:
+            sys.stdout.write("\n" + summary)
         return 0
-    out = Path(args.out).expanduser() if args.out else Path(out_dir).expanduser() / "energy-ratings.csv"
+    out = Path(args.out).expanduser() if args.out else Path(out_dir).expanduser() / ("tasks.csv" if args.tasks else "energy-ratings.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
-    print(f"wrote {out} ({len(rows) - 1} rated issues)")
+    print(f"wrote {out} ({len(rows) - 1} {what})")
+    if summary:
+        md = out.with_name(out.stem + "-summary.md")
+        md.write_text(summary, encoding="utf-8")
+        print(f"wrote {md}")
     return 0
 
 
