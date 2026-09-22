@@ -6,6 +6,11 @@ of the same week, matches events to issues (Linear URL or identifier in the even
 attachment the "＋" button adds to the issue), and writes a Markdown file meant for Obsidian: a
 summary table, an hour-by-day grid with ⚡ values, per-day lists and the rated/unrated tasks.
 
+--csv skips the calendar and lists every issue that carries a rating, one row each in the order the ratings
+were recorded (Linear's issue history says when the label was added; a completion or last-update time stands in
+when the history has no such entry). The `issue_link` column is a HYPERLINK formula, so the identifier opens the
+issue from Numbers, Excel or Google Sheets; `url` is the plain address.
+
 Stdlib only, Python 3.9+. Credentials come from the environment, never from arguments:
   LINEAR_API_KEY   Linear → Settings → Security & access → Personal API keys
   RECLAIM_TOKEN    app.reclaim.ai/settings/developer
@@ -15,6 +20,8 @@ Examples
   energy_week.py --team HOME --week 2026-W37 --out ~/Obsidian/notes/Energy/2026-W37.md
   energy_week.py --team HOME --cycle current                # the team's active Linear cycle → ./<week>.md
   energy_week.py --from-json tools/fixtures/energy_week_sample.json --print   # offline / tests
+  energy_week.py --team HOME --csv --out ~/Downloads/energy.csv    # every rated issue, oldest first, as a spreadsheet
+  energy_week.py --team HOME --csv --cycle current --print          # only the ratings recorded during the active cycle
 Environment: LINEAR_TEAM is the default for --team; ENERGY_OUT_DIR is the default output folder (else the
 current directory). --tz picks the grid's zone (default: the system zone).
 """
@@ -145,6 +152,25 @@ query($team:String!, $start:DateTimeOrDuration!, $end:DateTimeOrDuration!, $afte
 }
 """
 
+LABELLED_QUERY = """
+query($team:String!, $group:String!, $after:String) {
+  issues(first: 50, after: $after, includeArchived: true, orderBy: createdAt, filter: {
+    team: { key: { eq: $team } },
+    labels: { parent: { name: { eq: $group } } }
+  }) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      identifier title url estimate createdAt updatedAt completedAt
+      state { name type }
+      cycle { number startsAt endsAt }
+      parent { identifier }
+      labels { nodes { id name parent { name } } }
+      history(first: 100) { nodes { createdAt addedLabelIds } }
+    }
+  }
+}
+"""
+
 CYCLE_QUERY = """
 query($team:String!) {
   teams(filter: { key: { eq: $team } }) { nodes {
@@ -180,6 +206,18 @@ def fetch_issues(team: str, start: dt.date, end: dt.date, key: str, tz: Optional
         d = linear_post(ISSUES_QUERY, {"team": team, "start": _utc_iso(_midnight(start, tz)),
                                        "end": _utc_iso(_midnight(end, tz)), "after": after}, key)
         page = d["issues"]
+        out.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            return out
+        after = page["pageInfo"]["endCursor"]
+
+
+def fetch_labelled(team: str, group: str, key: str) -> List[Issue]:
+    """Every issue of the team, archived ones included, that carries a label from the energy group."""
+    out: List[Issue] = []
+    after = None
+    while True:
+        page = linear_post(LABELLED_QUERY, {"team": team, "group": group, "after": after}, key)["issues"]
         out.extend(page["nodes"])
         if not page["pageInfo"]["hasNextPage"]:
             return out
@@ -385,6 +423,82 @@ def render(start: dt.date, end: dt.date, events: List[Event], issues: List[Issue
 
 # ---- main ------------------------------------------------------------------------------------------
 
+# ---- CSV of every rated issue ---------------------------------------------------------------------
+
+ESTIMATE_NAMES = {1: "XS", 2: "S", 3: "M", 5: "L", 8: "XL"}   # Linear's T-shirt scale
+CSV_COLUMNS = ["recorded_at", "recorded_basis", "issue", "issue_link", "title", "energy", "status", "estimate", "cycle",
+               "parent", "created", "completed", "url"]
+
+
+def energy_label(issue: Issue, group: str) -> Optional[Dict[str, Any]]:
+    for label in issue.get("labels", {}).get("nodes", []):
+        if (label.get("parent") or {}).get("name") == group and energy_value(label.get("name", "")) is not None:
+            return label
+    return None
+
+
+def recorded_at(issue: Issue, group: str) -> Tuple[Optional[dt.datetime], str]:
+    """When the issue's current rating was set: the newest history entry that added that label; else the completion
+    time (ratings are meant to be set on closing); else the last update. The second value names which one it was."""
+    label = energy_label(issue, group)
+    if label and label.get("id"):
+        added = [h["createdAt"] for h in issue.get("history", {}).get("nodes", [])
+                 if label["id"] in (h.get("addedLabelIds") or []) and h.get("createdAt")]
+        if added:
+            return parse_when(max(added)), "label set"
+    for field, basis in (("completedAt", "completed"), ("updatedAt", "last updated")):
+        if issue.get(field):
+            return parse_when(issue[field]), basis
+    return None, "unknown"
+
+
+def hyperlink(url: str, text: str) -> str:
+    """A spreadsheet HYPERLINK formula (Numbers, Excel and Google Sheets all evaluate it on import)."""
+    q = lambda s: s.replace('"', '""')
+    return f'=HYPERLINK("{q(url)}","{q(text)}")'
+
+
+def csv_rows(issues: Iterable[Issue], group: str, tz: Optional[dt.tzinfo] = None,
+             start: Optional[dt.date] = None, end: Optional[dt.date] = None) -> List[List[str]]:
+    """Header plus one row per rated issue, oldest rating first (ties by identifier). With start/end, only ratings
+    recorded on a local day inside [start, end)."""
+    def local(d: Optional[dt.datetime]) -> str:
+        return _local(d, tz).strftime("%Y-%m-%d %H:%M") if d else ""
+
+    rows: List[Tuple[Tuple[float, str], List[str]]] = []
+    for issue in issues:
+        label = energy_label(issue, group)
+        if not label:
+            continue
+        when, basis = recorded_at(issue, group)
+        if start and end:
+            if not when or not (start <= _local(when, tz).date() < end):
+                continue
+        cycle = issue.get("cycle") or {}
+        cycle_text = ""
+        if cycle:
+            s, e = _local(parse_when(cycle["startsAt"]), tz).date(), _local(parse_when(cycle["endsAt"]), tz).date()
+            cycle_text = f"Cycle {cycle.get('number', '?')} ({s.isoformat()} to {e.isoformat()})"
+        est = issue.get("estimate")
+        row = [local(when), basis, issue.get("identifier", ""), hyperlink(issue.get("url", ""), issue.get("identifier", "")),
+               issue.get("title", ""), energy_text(energy_value(label.get("name", ""))).replace("−", "-"),
+               (issue.get("state") or {}).get("name", ""), ESTIMATE_NAMES.get(est, str(est)) if est is not None else "",
+               cycle_text, (issue.get("parent") or {}).get("identifier", "") if issue.get("parent") else "",
+               local(parse_when(issue["createdAt"])) if issue.get("createdAt") else "",
+               local(parse_when(issue["completedAt"])) if issue.get("completedAt") else "", issue.get("url", "")]
+        rows.append(((when.timestamp() if when else float("inf"), issue.get("identifier", "")), row))
+    rows.sort(key=lambda r: r[0])
+    return [CSV_COLUMNS] + [r for _, r in rows]
+
+
+def csv_text(rows: List[List[str]]) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="\n").writerows(rows)
+    return buf.getvalue()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     out_dir = os.environ.get("ENERGY_OUT_DIR") or DEFAULT_OUT_DIR
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -399,6 +513,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--from-json", metavar="FILE", help="use {issues:[…], events:[…]} from FILE instead of the APIs")
     ap.add_argument("--dump-json", metavar="FILE", help="save the fetched issues and events to FILE")
     ap.add_argument("--tz", help="IANA time zone for the grid (default: the system zone)")
+    ap.add_argument("--csv", action="store_true",
+                    help="instead of the week page: every rated issue as CSV, oldest rating first (--week/--cycle narrow it)")
     args = ap.parse_args(argv)
 
     if args.tz:
@@ -410,6 +526,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
     else:
         tz = None  # system zone; astimezone(None) resolves the offset per instant, so DST is right for any week
+
+    if args.csv:
+        return _main_csv(args, out_dir, tz)
 
     try:
         if args.from_json:
@@ -452,6 +571,45 @@ def main(argv: Optional[List[str]] = None) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md, encoding="utf-8")
     print(f"wrote {out} ({len(events)} events, {len(matches)} matched to {len(issues)} issues)")
+    return 0
+
+
+def _main_csv(args: argparse.Namespace, out_dir: str, tz: Optional[dt.tzinfo]) -> int:
+    """--csv: no calendar, no Reclaim token; the range (if any) filters by when the rating was recorded."""
+    try:
+        start = end = None
+        if args.from_json:
+            data = json.loads(Path(args.from_json).read_text(encoding="utf-8"))
+            issues = data["issues"]
+            if args.cycle:
+                raise ToolError("--cycle needs the Linear API; use --week with --from-json")
+            if args.week:
+                start, end = iso_week_range(args.week)
+        else:
+            key = os.environ.get("LINEAR_API_KEY")
+            if not key:
+                raise ToolError("set LINEAR_API_KEY in the environment (or use --from-json)")
+            if not args.team:
+                raise ToolError("pass --team or set LINEAR_TEAM (the Linear team key, e.g. HOME)")
+            if args.cycle:
+                start, end = cycle_range(args.team, args.cycle, key)
+            elif args.week:
+                start, end = iso_week_range(args.week)
+            issues = fetch_labelled(args.team, args.group, key)
+            if args.dump_json:
+                Path(args.dump_json).write_text(json.dumps({"issues": issues, "events": []}, indent=2), encoding="utf-8")
+        rows = csv_rows(issues, args.group, tz, start, end)
+    except ToolError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    text = csv_text(rows)
+    if args.print:
+        sys.stdout.write(text)
+        return 0
+    out = Path(args.out).expanduser() if args.out else Path(out_dir).expanduser() / "energy-ratings.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"wrote {out} ({len(rows) - 1} rated issues)")
     return 0
 
 
