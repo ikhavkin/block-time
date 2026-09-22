@@ -445,3 +445,88 @@ class AllDayInputs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CsvExport(unittest.TestCase):
+    def rows(self, **kw):
+        issues, _, start, end = load()
+        return ew.csv_rows(issues, "Energy Δ", LA, **kw)
+
+    def test_recorded_at_prefers_history_then_completion_then_update(self):
+        issues, _, _, _ = load()
+        by = {i["identifier"]: i for i in issues}
+        when, basis = ew.recorded_at(by["HOME-24"], "Energy Δ")
+        self.assertEqual((when.isoformat(), basis), ("2026-09-16T22:00:00+00:00", "label set"), "newest entry adding the current label")
+        when, basis = ew.recorded_at(by["HOME-26"], "Energy Δ")
+        self.assertEqual((when.isoformat(), basis), ("2026-09-18T01:00:00+00:00", "last updated"))
+        done = dict(by["HOME-24"], history={"nodes": []})
+        self.assertEqual(ew.recorded_at(done, "Energy Δ")[1], "completed")
+        self.assertEqual(ew.recorded_at({"labels": {"nodes": []}}, "Energy Δ"), (None, "unknown"))
+        self.assertEqual(ew.recorded_at(by["HOME-25"], "Energy Δ")[1], "completed", "no rating: still dated, csv_rows drops it")
+
+    def test_rows_are_oldest_first_with_links(self):
+        rows = self.rows()
+        self.assertEqual(rows[0], ew.CSV_COLUMNS)
+        self.assertEqual([r[2] for r in rows[1:]], ["HOME-21", "HOME-24", "HOME-26"], "history 09-15, history 09-16, update 09-17 local")
+        home24 = rows[2]
+        self.assertEqual(home24[:3], ["2026-09-16 15:00", "label set", "HOME-24"])
+        self.assertEqual(home24[3], '=HYPERLINK("https://linear.app/acme/issue/HOME-24/update-resume","HOME-24")')
+        self.assertEqual(home24[4:8], ["Update resume", "-2", "Done", "M"])
+        self.assertTrue(home24[8].startswith("Cycle 1 (2026-09-14 to 2026-09-21)"), home24[8])
+        self.assertEqual(rows[1][9], "HOME-19", "parent identifier")
+        self.assertEqual(home24[-1], "https://linear.app/acme/issue/HOME-24/update-resume")
+        self.assertNotIn("HOME-25", [r[2] for r in rows], "an unrated issue has no row")
+
+    def test_range_filters_by_recording_day(self):
+        rows = self.rows(start=dt.date(2026, 9, 16), end=dt.date(2026, 9, 17))
+        self.assertEqual([r[2] for r in rows[1:]], ["HOME-24"])
+        undated = dict(load()[0][0], history={"nodes": []}, completedAt=None, updatedAt=None)
+        self.assertEqual(ew.csv_rows([undated], "Energy Δ", LA, dt.date(2026, 9, 1), dt.date(2026, 10, 1)), [ew.CSV_COLUMNS], "no date: outside any range")
+        self.assertEqual(ew.csv_rows([undated], "Energy Δ", LA)[1][:2], ["", "unknown"], "without a range it is listed, last")
+
+    def test_csv_text_and_formula_quoting(self):
+        text = ew.csv_text([ew.CSV_COLUMNS, ["", "", "X-1", ew.hyperlink('https://x/?q="a"', "X-1"), 'a "quoted" title', "+1", "", "", "", "", "", "", ""]])
+        self.assertEqual(text.splitlines()[0], ",".join(ew.CSV_COLUMNS))
+        self.assertIn('"=HYPERLINK(""https://x/?q=""""a"""""",""X-1"")"', text)
+        self.assertIn('"a ""quoted"" title"', text)
+        import csv, io
+        back = list(csv.reader(io.StringIO(text)))
+        self.assertEqual(back[1][3], '=HYPERLINK("https://x/?q=""a""","X-1")', "round-trips through a CSV reader")
+
+    def test_cli_csv(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ew.main(["--csv", "--from-json", str(FIX), "--print", "--tz", "America/Los_Angeles"])
+        self.assertEqual(rc, 0)
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(lines[0], ",".join(ew.CSV_COLUMNS))
+        self.assertEqual(len(lines), 4)
+        with redirect_stdout(io.StringIO()):
+            rc = ew.main(["--csv", "--from-json", str(FIX), "--week", "2026-W38", "--print"])
+        self.assertEqual(rc, 0)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ew.main(["--csv", "--from-json", str(FIX), "--week", "2026-W37", "--print", "--tz", "America/Los_Angeles"])
+        self.assertEqual(buf.getvalue().splitlines(), [",".join(ew.CSV_COLUMNS)], "nothing recorded in W37")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "sub" / "ratings.csv"
+            with redirect_stdout(io.StringIO()):
+                rc = ew.main(["--csv", "--from-json", str(FIX), "--out", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.read_text(encoding="utf-8").splitlines()[0], ",".join(ew.CSV_COLUMNS))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(ew.main(["--csv", "--from-json", str(FIX), "--cycle", "current", "--print"]), 1)
+
+    def test_cli_csv_needs_only_the_linear_key(self):
+        old = {k: os.environ.pop(k, None) for k in ("LINEAR_API_KEY", "RECLAIM_TOKEN")}
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                rc = ew.main(["--csv", "--team", "HOME", "--print"])
+            self.assertEqual(rc, 1)
+            self.assertIn("LINEAR_API_KEY", err.getvalue())
+            self.assertNotIn("RECLAIM_TOKEN", err.getvalue(), "the calendar is not involved")
+        finally:
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
